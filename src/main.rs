@@ -22,6 +22,7 @@ use tokenizers::tokenizer::{Tokenizer,
 };
 
 use layer::model::{RobertaConfig, RobertaForSequenceClassification};
+use tokenizers::{truncate_encodings, TruncationParams};
 use crate::utils::*;
 
 fn main() -> Result<(),Box<dyn std::error::Error + Send + Sync>>{
@@ -73,12 +74,30 @@ fn main() -> Result<(),Box<dyn std::error::Error + Send + Sync>>{
 
     println!("create data loader");
     // create a data loader
+
+    // pad config for create a dataloader
+    let mut pad_config: PaddingParams = PaddingParams{
+        strategy: PaddingStrategy::BatchLongest,
+        direction: PaddingDirection::Right,
+        pad_to_multiple_of: Some(batch_size),
+        pad_id: config.pad_token_id,
+        pad_type_id: 0,
+        pad_token: String::from("<pad>"),
+    };
+    let truncate_params: TruncationParams = TruncationParams { 
+        direction: tokenizers::TruncationDirection::Right,
+        max_length: config.max_position_embeddings,
+        strategy: tokenizers::TruncationStrategy::OnlyFirst,
+        stride: 0 
+    };
+
     let n_samples: usize = datasets.len();
-    let mut data_loader: Vec<(Vec<String>, Vec<u32>)> = Vec::new();
+    let mut data_loader: Vec<(Vec<u32>, Vec<u32>)> = Vec::new();
     for i in (0..n_samples).step_by(batch_size) {
         let end = (i + batch_size).min(n_samples);
-        let mut x_batch: Vec<String> = Vec::with_capacity(end-i);
-        let mut y_batch: Vec<u32> = Vec::with_capacity(end-i);
+        let local_batch: usize = end-i;
+        let mut x_batch: Vec<String> = Vec::with_capacity(local_batch);
+        let mut y_batch: Vec<u32> = Vec::with_capacity(local_batch);
 
         for _ in i..end{
             let (x,y) = match datasets.pop(){
@@ -88,7 +107,20 @@ fn main() -> Result<(),Box<dyn std::error::Error + Send + Sync>>{
             x_batch.push(x);
             y_batch.push(y);
         }
-        data_loader.push((x_batch, y_batch));
+
+        pad_config.pad_to_multiple_of = Some(local_batch);
+
+        // encode a vector of string to vector ot unsigned int
+        let mut encode = tokenizer.encode_batch(x_batch,true)?;
+        pad_encodings(&mut encode,&pad_config)?;
+
+        let mut batch_encode: Vec<u32> = Vec::new();
+        for element in encode.into_iter(){
+            let (element, _) = truncate_encodings(element, None, &truncate_params)?; 
+            let mut val:Vec<u32> = element.get_ids().to_vec(); 
+            batch_encode.append(&mut val);
+        }
+        data_loader.push((batch_encode, y_batch));
     }
 
     drop(text);
@@ -113,42 +145,25 @@ fn main() -> Result<(),Box<dyn std::error::Error + Send + Sync>>{
     };
     let mut optimizer: AdamW = AdamW::new(varmap.all_vars(), param)?;
 
-    // pad config for create a dataloader
-    let mut pad_config: PaddingParams = PaddingParams{
-        strategy: PaddingStrategy::BatchLongest,
-        direction: PaddingDirection::Right,
-        pad_to_multiple_of: Some(batch_size),
-        pad_id: config.pad_token_id,
-        pad_type_id: 0,
-        pad_token: String::from("<pad>"),
-    };
+
     println!("start train");
     for _ in 0..epoch{
         for (i, (inp,target)) in data_loader.iter().enumerate(){
             let local_batch: usize = target.len();
             pad_config.pad_to_multiple_of = Some(local_batch);
-            
-            println!("tokenize text");
-            // encode a vector of string to vector ot unsigned int
-            let mut encode = tokenizer.encode_batch(inp.clone(),true)?;
-            pad_encodings(&mut encode,&pad_config)?;
-            let mut batch_encode: Vec<u32> = Vec::new();
-            for element in encode.into_iter(){
-                let mut val:Vec<u32> = element.get_ids().to_vec(); 
-                batch_encode.append(&mut val);
-            }
-            println!("forward");
-            let shape: (usize,usize) = (local_batch,batch_encode.len()/local_batch);
+
+            let shape: (usize,usize) = (local_batch,inp.len()/local_batch);
             let target: Tensor = Tensor::from_vec(target.clone(),shape.0,&device)?;
-            let input_ids: Tensor = Tensor::from_vec(batch_encode.clone(), shape, &device)?;
+            let input_ids: Tensor = Tensor::from_vec(inp.clone(), shape, &device)?;
+            println!("{}",input_ids);
             let token_type_ids: Tensor = input_ids.zeros_like()?;
             let attention_mask: Tensor = input_ids.eq(config.pad_token_id)?
                 .to_dtype(DType::F32)?
                 .broadcast_mul(&Tensor::new(&[f32::MIN],&device)?)?
                 .unsqueeze(1)?
                 .unsqueeze(1)?;
+
             let pred: Tensor = model.forward(&input_ids, &token_type_ids, &attention_mask, train)?;
-            println!("backward");
             let loss: Tensor = cross_entropy(&pred, &target)?;
             optimizer.backward_step(&loss)?;
 
