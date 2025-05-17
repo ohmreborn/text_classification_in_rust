@@ -116,13 +116,6 @@ pub fn load_some_layer<P: AsRef<Path>>(obj:&mut VarMap, path: P) -> Result<(), B
     Ok(())
 }
 
-// pub fn save<P: AsRef<Path>>(obj:&mut VarMap, path: P)  -> Result<(), Box<dyn Error + Send + Sync>> {
-//     let tensor_data = obj.data().lock().unwrap();
-//     let data = tensor_data.iter().map(|(k, v)| (k, v.as_tensor()));
-//     safetensors::tensor::serialize_to_file(data, &None, path.as_ref())?;
-//     Ok(())
-// }
-
 // https://github.com/huggingface/transformers/blob/main/src/transformers/optimization.py#L100C5-L100C47
 pub fn new_lr(lr: f64,curr_step: usize,num_train_step: usize, num_warmup: usize) -> f64{
     if curr_step < num_warmup{
